@@ -1,13 +1,22 @@
 package client.controller;
 
+import client.file.FileTransferManager;
 import client.tcp.TCPClient;
 import client.ui.LobbyView;
 import client.ui.LoginView;
 import client.ui.RoomView;
 import client.ui.SceneManager;
+import common.model.Message;
+import common.protocol.FileTransferConstants;
 import common.protocol.TcpCommand;
+import common.util.FileSizeFormatter;
 import javafx.application.Platform;
+import javafx.stage.FileChooser;
 import javafx.stage.Stage;
+
+import java.io.File;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 
 /**
  * AppController là "bộ não" của client: nơi duy nhất vừa cầm TCPClient
@@ -28,6 +37,7 @@ public class AppController {
 
     private final SceneManager sceneManager;
     private final TCPClient tcpClient = new TCPClient(SERVER_HOST, SERVER_PORT);
+    private final FileTransferManager fileTransferManager;
 
     private final LoginView loginView = new LoginView();
     private final LobbyView lobbyView = new LobbyView();
@@ -38,6 +48,34 @@ public class AppController {
 
     public AppController(Stage stage) {
         this.sceneManager = new SceneManager(stage);
+        // Thư mục lưu file nhận được, đặt ngay cạnh nơi chạy app cho dễ tìm khi demo.
+        Path downloadDir = Paths.get("downloads");
+        this.fileTransferManager = new FileTransferManager(tcpClient, downloadDir, new FileTransferManager.Listener() {
+            @Override
+            public void onProgress(String label, int percent) {
+                // onProgress có thể được gọi từ thread gửi file (sendFile chạy
+                // nền) hoặc từ ioExecutor (khi nhận file) - cả 2 đều KHÔNG phải
+                // JavaFX Application Thread, nên bắt buộc bọc Platform.runLater
+                // trước khi động vào bất kỳ control nào của UI.
+                Platform.runLater(() -> roomView.updateTransferProgress(label, percent));
+            }
+
+            @Override
+            public void onCompleted(String sender, String fileName, Path savedPath) {
+                Platform.runLater(() -> {
+                    roomView.hideTransferProgress();
+                    roomView.appendLog("[File] " + sender + " đã gửi " + fileName + " -> đã lưu tại " + savedPath);
+                });
+            }
+
+            @Override
+            public void onError(String message) {
+                Platform.runLater(() -> {
+                    roomView.hideTransferProgress();
+                    roomView.appendLog("[Lỗi file] " + message);
+                });
+            }
+        });
         wireEvents();
     }
 
@@ -49,6 +87,7 @@ public class AppController {
     /** Gọi khi đóng cửa sổ: ngắt kết nối TCP cho gọn, tránh giữ socket "treo" ở server. */
     public void shutdown() {
         tcpClient.disconnect();
+        fileTransferManager.shutdown();
     }
 
     private void wireEvents() {
@@ -56,6 +95,11 @@ public class AppController {
         lobbyView.getCreateRoomButton().setOnAction(e -> onCreateRoomClicked());
         lobbyView.getJoinRoomButton().setOnAction(e -> onJoinRoomClicked());
         roomView.getLeaveButton().setOnAction(e -> onLeaveRoomClicked());
+        roomView.getSendButton().setOnAction(e -> onSendChatClicked());
+        roomView.getSendFileButton().setOnAction(e -> onSendFileClicked());
+        // TextField.setOnAction() tự kích hoạt khi người dùng nhấn Enter trong ô
+        // input - cho phép gửi tin nhắn bằng Enter, không bắt buộc phải bấm nút Gửi.
+        roomView.getChatInput().setOnAction(e -> onSendChatClicked());
     }
 
     private void onLoginClicked() {
@@ -119,6 +163,61 @@ public class AppController {
         }
     }
 
+    private void onSendChatClicked() {
+        String content = roomView.getChatInput().getText().trim();
+        if (content.isEmpty()) {
+            return;
+        }
+        // Không tự vẽ tin nhắn của mình lên UI ngay ở đây. Server sẽ broadcast
+        // ngược lại (kể cả cho chính người gửi) qua handleServerMessage() ->
+        // đảm bảo UI luôn hiển thị đúng 1 nguồn dữ liệu duy nhất từ server.
+        tcpClient.send(TcpCommand.CHAT + "|" + content);
+        roomView.clearChatInput();
+    }
+
+    private void onSendFileClicked() {
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Chọn file để gửi");
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter(
+                "Tài liệu / Ảnh (pdf, docx, txt, jpg, png)",
+                "*.pdf", "*.docx", "*.txt", "*.jpg", "*.jpeg", "*.png"));
+
+        File file = chooser.showOpenDialog(sceneManager.getStage());
+        if (file == null) {
+            return; // người dùng bấm Cancel
+        }
+        // Kiểm tra lại lần nữa (không chỉ dựa vào bộ lọc của FileChooser, vì
+        // người dùng vẫn có thể gõ tay tên file khác định dạng trong 1 số hệ
+        // điều hành) - validate 2 lớp cho chắc, giống nguyên tắc "không tin
+        // dữ liệu đầu vào" đã áp dụng ở phía server.
+        if (!FileTransferConstants.isAllowed(file.getName())) {
+            roomView.appendLog("[Lỗi file] Định dạng không được hỗ trợ: " + file.getName());
+            return;
+        }
+
+        roomView.appendLog("Bắt đầu gửi " + file.getName() + " (" + FileSizeFormatter.format(file.length()) + ")");
+
+        // sendFile() đọc file + gửi qua mạng tuần tự (BLOCKING), nên phải chạy
+        // trên thread nền - giống hệt lý do connectThenSend() không chạy trực
+        // tiếp trên JavaFX Application Thread.
+        Thread sendThread = new Thread(() -> {
+            try {
+                fileTransferManager.sendFile(file);
+                Platform.runLater(() -> {
+                    roomView.hideTransferProgress();
+                    roomView.appendLog("Đã gửi xong " + file.getName());
+                });
+            } catch (Exception ex) {
+                Platform.runLater(() -> {
+                    roomView.hideTransferProgress();
+                    roomView.appendLog("[Lỗi file] Gửi thất bại: " + ex.getMessage());
+                });
+            }
+        });
+        sendThread.setDaemon(true);
+        sendThread.start();
+    }
+
     /**
      * TOÀN BỘ message từ server đều đi qua đây. Được gọi thông qua Platform.runLater
      * (xem connectThenSend), nên đang chạy trên JavaFX Application Thread -> được phép
@@ -154,9 +253,25 @@ public class AppController {
                 sceneManager.switchTo(lobbyView.getScene());
             }
             case TcpCommand.SYSTEM_MESSAGE -> roomView.appendLog("[Hệ thống] " + parts[1]);
+            case TcpCommand.CHAT -> handleChatReceived(line);
+            case TcpCommand.FILE_START -> fileTransferManager.handleFileStart(parts);
+            case TcpCommand.FILE_CHUNK -> fileTransferManager.handleFileChunk(parts);
+            case TcpCommand.FILE_END -> fileTransferManager.handleFileEnd(parts);
             case TcpCommand.ERROR -> handleError(parts);
             default -> System.out.println("Client nhận lệnh không xác định: " + line);
         }
+    }
+
+    /**
+     * Nhận CHAT|roomId|sender|timestamp|content từ server.
+     * Tự split lại "line" với limit=5 (không dùng "parts" đã split sẵn ở trên
+     * với limit=-1), vì lý do giống hệt phía server: nếu content chứa ký tự
+     * "|", split limit=-1 sẽ cắt vụn content thành nhiều phần tử dư thừa.
+     */
+    private void handleChatReceived(String line) {
+        String[] chatParts = line.split(TcpCommand.DELIMITER, 5);
+        Message message = Message.fromBroadcastParts(chatParts);
+        roomView.appendLog("[" + message.getFormattedTime() + "] " + message.getSender() + ": " + message.getContent());
     }
 
     /** ERROR|code|message -> hiển thị message ở màn hình đang mở (login hoặc lobby). */

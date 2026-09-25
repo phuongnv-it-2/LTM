@@ -1,1 +1,4 @@
+common\model\Message.class
+common\protocol\FileTransferConstants.class
+common\util\FileSizeFormatter.class
 common\protocol\TcpCommand.class

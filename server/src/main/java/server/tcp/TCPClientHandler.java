@@ -1,6 +1,8 @@
 package server.tcp;
 
+import common.model.Message;
 import common.protocol.TcpCommand;
+import server.file.FileTransferManager;
 import server.room.Room;
 import server.room.RoomManager;
 import server.session.ClientSession;
@@ -78,6 +80,10 @@ public class TCPClientHandler implements Runnable {
             case TcpCommand.CREATE_ROOM -> handleCreateRoom(parts);
             case TcpCommand.JOIN_ROOM -> handleJoinRoom(parts);
             case TcpCommand.LEAVE_ROOM -> handleLeaveRoom();
+            case TcpCommand.CHAT -> handleChat(line);
+            case TcpCommand.FILE_START -> handleFileStart(parts);
+            case TcpCommand.FILE_CHUNK -> handleFileChunk(parts);
+            case TcpCommand.FILE_END -> handleFileEnd(parts);
             default -> session.send(TcpCommand.ERROR + "|UNKNOWN_COMMAND|" + command);
         }
     }
@@ -147,6 +153,101 @@ public class TCPClientHandler implements Runnable {
         session.send(TcpCommand.LEAVE_SUCCESS + "|" + roomId);
         room.broadcast(TcpCommand.SYSTEM_MESSAGE + "|" + username + " da roi phong", session);
         System.out.println(log(username + " left room " + roomId));
+    }
+
+    /**
+     * Xử lý CHAT|noi_dung.
+     * Dùng "line" (dòng gốc) thay vì "parts" đã split sẵn ở handleCommand(), vì
+     * handleCommand() split với limit=-1 (không giới hạn số lần tách) - nếu người
+     * dùng gõ tin nhắn có chứa ký tự "|", nó sẽ bị cắt vụn thành nhiều phần tử,
+     * mất mất nội dung. Ở đây ta tự split lại với limit=2, đảm bảo chỉ tách
+     * đúng 1 lần đầu tiên ("CHAT" và toàn bộ phần còn lại là content), giữ
+     * nguyên nội dung dù có bao nhiêu ký tự "|" đi nữa.
+     */
+    private void handleChat(String line) {
+        Room room = requireRoom();
+        if (room == null) return;
+
+        String[] chatParts = line.split(TcpCommand.DELIMITER, 2);
+        if (chatParts.length < 2 || chatParts[1].isBlank()) {
+            session.send(TcpCommand.ERROR + "|EMPTY_MESSAGE|Tin nhan khong duoc de trong");
+            return;
+        }
+        String content = chatParts[1];
+
+        // Server tự gắn sender (lấy từ session, không tin client tự khai) và
+        // timestamp (lấy giờ server, không tin đồng hồ máy client) -> đảm bảo
+        // 2 field quan trọng này không thể bị giả mạo.
+        Message message = new Message(room.getRoomId(), session.getUsername(), content, System.currentTimeMillis());
+
+        room.broadcastAll(message.toProtocolLine());
+        System.out.println(log("Chat in room " + room.getRoomId() + " - " + session.getUsername() + ": " + content));
+    }
+
+    // ===== Phase 4: TCP File Transfer =====
+    // Cả 3 lệnh FILE_START/FILE_CHUNK/FILE_END đều cần đúng 2 điều kiện giống
+    // nhau: đã login + đang ở trong 1 phòng -> gom logic kiểm tra room vào 1
+    // hàm dùng chung (requireRoom()) thay vì lặp lại if ở cả 3 chỗ.
+
+    private void handleFileStart(String[] parts) {
+        Room room = requireRoom();
+        if (room == null) return;
+        if (parts.length < 3 || parts[1].isBlank() || parts[2].isBlank()) {
+            session.send(TcpCommand.ERROR + "|INVALID_FILE_START|Thieu ten file hoac kich thuoc");
+            return;
+        }
+        String fileName = parts[1];
+        String fileSize = parts[2];
+
+        FileTransferManager.relayFileStart(room, session, fileName, fileSize);
+        System.out.println(log(session.getUsername() + " bat dau gui file '" + fileName
+                + "' (" + fileSize + " bytes) vao phong " + room.getRoomId()));
+    }
+
+    private void handleFileChunk(String[] parts) {
+        Room room = requireRoom();
+        if (room == null) return;
+        if (parts.length < 4) {
+            session.send(TcpCommand.ERROR + "|INVALID_FILE_CHUNK|Du lieu chunk khong hop le");
+            return;
+        }
+        String fileName = parts[1];
+        String chunkIndex = parts[2];
+        String base64Data = parts[3];
+
+        // Không log ở mức từng chunk (1 file vài MB có thể ra hàng ngàn chunk,
+        // log sẽ trôi mất các dòng log quan trọng khác như "Client connected").
+        FileTransferManager.relayFileChunk(room, session, fileName, chunkIndex, base64Data);
+    }
+
+    private void handleFileEnd(String[] parts) {
+        Room room = requireRoom();
+        if (room == null) return;
+        if (parts.length < 2 || parts[1].isBlank()) {
+            session.send(TcpCommand.ERROR + "|INVALID_FILE_END|Thieu ten file");
+            return;
+        }
+        String fileName = parts[1];
+
+        FileTransferManager.relayFileEnd(room, session, fileName);
+        System.out.println(log(session.getUsername() + " da gui xong file '" + fileName
+                + "' trong phong " + room.getRoomId()));
+    }
+
+    /**
+     * Kiểm tra session đã LOGIN và đang ở trong phòng nào đó chưa - điều kiện
+     * bắt buộc cho cả CHAT lẫn FILE_*. Trả về Room nếu hợp lệ, trả về null (và
+     * đã tự gửi ERROR cho client) nếu chưa đủ điều kiện, để hàm gọi chỉ cần
+     * viết "if (room == null) return;" mà không cần lặp lại logic kiểm tra.
+     */
+    private Room requireRoom() {
+        if (!requireLogin()) return null;
+        Room room = session.getCurrentRoom();
+        if (room == null) {
+            session.send(TcpCommand.ERROR + "|NOT_IN_ROOM|Ban can vao phong truoc");
+            return null;
+        }
+        return room;
     }
 
     /** Kiểm tra session đã LOGIN chưa trước khi cho phép các lệnh cần username (CREATE_ROOM, JOIN_ROOM...). */

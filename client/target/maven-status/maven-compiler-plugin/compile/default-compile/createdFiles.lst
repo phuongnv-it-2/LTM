@@ -1,8 +1,11 @@
+client\file\FileTransferManager$Listener.class
 client\controller\AppController.class
 client\ui\SceneManager.class
 client\tcp\TCPClient.class
 client\ui\LobbyView.class
 client\ClientApplication.class
 client\ui\RoomView.class
+client\file\FileTransferManager.class
 client\ui\LoginView.class
+client\controller\AppController$1.class
 client\ui\MainView.class

@@ -60,4 +60,17 @@ public class Room {
             }
         }
     }
+
+    /**
+     * Gửi message cho TẤT CẢ participant, kể cả người vừa gửi.
+     * Dùng cho CHAT: người gửi cũng cần nhận lại đúng bản server đã gắn
+     * timestamp, để mọi client (kể cả người gửi) hiển thị chat từ 1 nguồn
+     * dữ liệu duy nhất (server), thay vì tự vẽ tin nhắn của mình lên UI ngay
+     * lúc bấm Gửi rồi lại nhận thêm 1 bản nữa từ server (dễ bị trùng/lệch thứ tự).
+     */
+    public void broadcastAll(String message) {
+        for (ClientSession p : participants) {
+            p.send(message);
+        }
+    }
 }

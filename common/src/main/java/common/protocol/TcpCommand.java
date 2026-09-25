@@ -28,6 +28,39 @@ public final class TcpCommand {
     public static final String SYSTEM_MESSAGE = "SYSTEM_MESSAGE"; // SYSTEM_MESSAGE|nội dung
     public static final String ERROR = "ERROR";                   // ERROR|code|message
 
+    // ===== Phase 3: TCP Chat =====
+    // Client gửi lên:   CHAT|noi_dung
+    //   (không kèm roomId/username vì server đã biết qua ClientSession -> tránh
+    //   client tự xưng "tôi là ai" hoặc "tôi đang ở phòng nào" giả mạo)
+    // Server broadcast xuống: CHAT|roomId|sender|timestamp|noi_dung
+    public static final String CHAT = "CHAT";
+
+    // ===== Phase 4: TCP File Transfer =====
+    // Cùng nguyên tắc với CHAT: client KHÔNG gửi roomId/username, server tự
+    // suy ra từ ClientSession đang giữ (session.getCurrentRoom(), session.getUsername()).
+    //
+    // Client gửi lên (người gửi file):
+    //   FILE_START|fileName|fileSize
+    //   FILE_CHUNK|fileName|chunkIndex|base64Data
+    //   FILE_END|fileName
+    // Server forward xuống cho các participant còn lại trong phòng (thêm roomId,
+    // sender vào giữa để người nhận biết ai gửi, phòng nào):
+    //   FILE_START|roomId|sender|fileName|fileSize
+    //   FILE_CHUNK|roomId|sender|fileName|chunkIndex|base64Data
+    //   FILE_END|roomId|sender|fileName
+    //
+    // Vì sao base64Data mà không gửi thẳng byte thô?
+    // Kết nối TCP hiện tại dùng BufferedReader/PrintWriter theo DÒNG VĂN BẢN
+    // (readLine/println) cho TOÀN BỘ protocol, kể cả LOGIN, CHAT... Nếu gửi byte
+    // thô của file (có thể chứa byte 0x0A giống ký tự xuống dòng), readLine() ở
+    // đầu nhận sẽ hiểu nhầm là hết dòng giữa chừng, làm hỏng dữ liệu. Base64 chỉ
+    // dùng các ký tự an toàn (A-Z a-z 0-9 + / =), luôn nằm gọn trong 1 dòng, nên
+    // có thể tái sử dụng đúng pipe đọc/ghi dòng đã xây từ Phase 1 mà không cần
+    // đổi sang chế độ đọc byte thô (phức tạp hơn nhiều cho 1 đồ án sinh viên).
+    public static final String FILE_START = "FILE_START";
+    public static final String FILE_CHUNK = "FILE_CHUNK";
+    public static final String FILE_END = "FILE_END";
+
     // Ký tự ngăn cách giữa các trường trong 1 message, ví dụ: LOGIN|username|password
     public static final String DELIMITER = "\\|";
 
