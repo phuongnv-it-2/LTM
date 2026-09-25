@@ -1,0 +1,8 @@
+client\controller\AppController.class
+client\ui\SceneManager.class
+client\tcp\TCPClient.class
+client\ui\LobbyView.class
+client\ClientApplication.class
+client\ui\RoomView.class
+client\ui\LoginView.class
+client\ui\MainView.class
